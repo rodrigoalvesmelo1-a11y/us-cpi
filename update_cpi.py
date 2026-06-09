@@ -4,10 +4,12 @@ Monthly CPI update script.
 
 Run after BLS publishes new CPI data. Workflow:
   1. Re-runs build_us_cpi.py to fetch the latest raw index data from BLS API.
-  2. Computes MoM / MM3MA / MM6MA / YoY variations in Python from raw data.
-  3. Updates the Tabela sheet in US_CPI_FINAL.xlsx with new values and colors.
-  4. Generates cpi_table.html for GitHub Pages.
-  5. Commits and pushes to GitHub.
+  2. Appends the new month column to US_CPI and US_CPI_Weights sheets in FINAL.xlsx
+     (extends row 5 date headers + row 6+ data — never deletes existing dates/data).
+  3. Writes the new month label to Tabela cell D3 only; E3:I3 update via their formulas.
+  4. Computes MoM / MM3MA / MM6MA / YoY in Python and fills the Tabela data rows.
+  5. Generates cpi_table.html for GitHub Pages.
+  6. Commits and pushes to GitHub.
 
 Usage:
     cd C:\\Users\\rodri\\us-cpi
@@ -47,6 +49,24 @@ def _col_to_label(col_idx, ws_raw):
     return v if v else f"col{col_idx}"
 
 
+def _last_date_col(ws):
+    """Find rightmost column in row 5 that has a non-None value."""
+    for c in range(ws.max_column, 3, -1):
+        if ws.cell(5, c).value is not None:
+            return c
+    return 3
+
+
+def _build_cat_to_row(ws, min_row=6, cat_col=3):
+    """Map category name → row number in ws (exact match)."""
+    result = {}
+    for r in range(min_row, ws.max_row + 1):
+        cat = ws.cell(r, cat_col).value
+        if cat is not None:
+            result[str(cat).strip()] = r
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Step 1 – fetch fresh raw data
 # ---------------------------------------------------------------------------
@@ -64,7 +84,60 @@ def rebuild_source():
 
 
 # ---------------------------------------------------------------------------
-# Step 2 – compute variations from raw index data
+# Step 2 – append new month columns to FINAL.xlsx raw sheets
+# ---------------------------------------------------------------------------
+
+def copy_new_months_to_final(ws_src_raw, ws_src_wts, ws_final_raw, ws_final_wts):
+    """
+    Appends any new month columns from SOURCE into FINAL's US_CPI and
+    US_CPI_Weights sheets. Never overwrites existing data — only extends.
+
+    Row 5  = date headers (extended for each new month)
+    Rows 6+ = index / weight values (matched by category name in col 3)
+    """
+    final_lc = _last_date_col(ws_final_raw)
+    src_lc   = _last_date_col(ws_src_raw)
+
+    if src_lc <= final_lc:
+        print(f"  FINAL raw data already current (last col = {final_lc})")
+        return
+
+    new_cols = list(range(final_lc + 1, src_lc + 1))
+    print(f"  Appending {len(new_cols)} new month(s) to FINAL: col {new_cols[0]}..{new_cols[-1]}")
+
+    # extend date headers in row 5
+    for c in new_cols:
+        ws_final_raw.cell(5, c).value = ws_src_raw.cell(5, c).value
+        ws_final_wts.cell(5, c).value = (ws_src_wts.cell(5, c).value
+                                          or ws_src_raw.cell(5, c).value)
+
+    # append index values (US_CPI sheet), matched by category name
+    final_rows = _build_cat_to_row(ws_final_raw)
+    for r_src in range(6, ws_src_raw.max_row + 1):
+        cat = ws_src_raw.cell(r_src, 3).value
+        if cat is None:
+            continue
+        r_fin = final_rows.get(str(cat).strip())
+        if r_fin is None:
+            continue
+        for c in new_cols:
+            ws_final_raw.cell(r_fin, c).value = ws_src_raw.cell(r_src, c).value
+
+    # append weight values (US_CPI_Weights sheet)
+    final_wt_rows = _build_cat_to_row(ws_final_wts)
+    for r_src in range(6, ws_src_wts.max_row + 1):
+        cat = ws_src_wts.cell(r_src, 3).value
+        if cat is None:
+            continue
+        r_fin = final_wt_rows.get(str(cat).strip())
+        if r_fin is None:
+            continue
+        for c in new_cols:
+            ws_final_wts.cell(r_fin, c).value = ws_src_wts.cell(r_src, c).value
+
+
+# ---------------------------------------------------------------------------
+# Step 3 – compute variations from raw index data
 # ---------------------------------------------------------------------------
 
 def load_raw(ws_raw):
@@ -132,7 +205,7 @@ def last_col(raw):
 
 
 # ---------------------------------------------------------------------------
-# Step 3 – fill Tabela sheet
+# Step 4 – fill Tabela sheet
 # ---------------------------------------------------------------------------
 
 NUM_FMT = "0.00"
@@ -149,10 +222,13 @@ def fill_tabela(ws_tabela, ws_weights, variations, last_c):
     """
     variations = {"MoM": {cat: {col: val}}, "MM3MA": ..., ...}
     last_c     = 1-based column index of the most recent month.
+
+    Writes only data cells (cols C-K in rows 4-169). Header rows and month
+    label cells in row 3 are NOT touched here — D3 is written in main().
     """
     DATE_COLS = [last_c - i for i in range(6)]
 
-    # --- read weights (most recent month per category) ---
+    # read weights (most recent month per category)
     wt_cats = {}
     for row in ws_weights.iter_rows(min_row=6, values_only=True):
         cat = row[2]
@@ -184,20 +260,20 @@ def fill_tabela(ws_tabela, ws_weights, variations, last_c):
                 continue
             data = var[sk]
 
-            # 6 months
+            # 6 months (cols D-I)
             for i, c in enumerate(DATE_COLS):
                 v = data.get(c)
                 cell = ws_tabela.cell(r, 4 + i)
                 cell.value         = v if isinstance(v, (int, float)) else None
                 cell.number_format = NUM_FMT
 
-            # historical average
+            # historical average (col J)
             all_v = [v for v in data.values() if isinstance(v, (int, float))]
             havg  = sum(all_v) / len(all_v) if all_v else None
             ws_tabela.cell(r, 10).value         = havg
             ws_tabela.cell(r, 10).number_format = NUM_FMT
 
-            # distance
+            # distance from average (col K)
             latest = data.get(last_c)
             if isinstance(latest, (int, float)) and isinstance(havg, (int, float)):
                 dist = latest - havg
@@ -208,7 +284,7 @@ def fill_tabela(ws_tabela, ws_weights, variations, last_c):
 
 
 # ---------------------------------------------------------------------------
-# Step 4 – apply per-row (per-category) std-dev colors
+# Step 5 – apply per-row (per-category) std-dev colors
 # ---------------------------------------------------------------------------
 
 BLOCK_ROWS = [
@@ -267,7 +343,7 @@ def apply_colors(ws_tabela, variations):
 
 
 # ---------------------------------------------------------------------------
-# Step 5 – generate HTML
+# Step 6 – generate HTML
 # ---------------------------------------------------------------------------
 
 SECTION_LABELS = {
@@ -288,16 +364,12 @@ def _argb_to_css(argb):
     return f"background-color:rgb({r},{g},{b})"
 
 
-def generate_html(ws_tabela, out_path, latest_label):
-    rows_by_section = {
-        "MoM":   list(range(4,  44)),
-        "MM3MA": list(range(46, 86)),
-        "MM6MA": list(range(88, 128)),
-        "YoY":   list(range(130, 170)),
-    }
-    # read header date labels from row 3 / 45 / 87 / 129 cols D-I
-    header_rows = {"MoM": 3, "MM3MA": 45, "MM6MA": 87, "YoY": 129}
-
+def generate_html(ws_tabela, out_path, latest_label, date_labels):
+    """
+    date_labels: list of 6 strings [newest, ..., oldest] computed from SOURCE_XLS
+                 row 5 — used directly instead of reading Tabela row 3 (which may
+                 contain formula strings that openpyxl cannot evaluate).
+    """
     html_parts = [f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -324,15 +396,11 @@ def generate_html(ws_tabela, out_path, latest_label):
 <body>
 <h1>US CPI-U Analysis — {latest_label}</h1>
 <p class="note">Source: BLS Public Data API v2. Colors: red = above historical average,
-blue = below. Intensity scale capped at ±2σ per section.</p>
+blue = below. Intensity scale capped at ±2σ per category historical series.</p>
 """]
 
     for block, first_row in [("MoM", 4), ("MM3MA", 46), ("MM6MA", 88), ("YoY", 130)]:
         last_row = first_row + 39
-        hdr_row  = header_rows[block]
-
-        # date labels
-        date_labels = [ws_tabela.cell(hdr_row, 4 + i).value or f"M-{i}" for i in range(6)]
 
         html_parts.append(f"<h2>{SECTION_LABELS[block]}</h2>\n<table>\n<thead><tr>")
         html_parts.append('<th class="cat">Category</th>')
@@ -352,7 +420,6 @@ blue = below. Intensity scale capped at ±2σ per section.</p>
             havg = ws_tabela.cell(r, 10).value
             dist = ws_tabela.cell(r, 11).value
 
-            # color for distance cell
             try:
                 argb = ws_tabela.cell(r, 11).fill.fgColor.rgb
             except Exception:
@@ -380,7 +447,7 @@ blue = below. Intensity scale capped at ±2σ per section.</p>
 
 
 # ---------------------------------------------------------------------------
-# Step 6 – git commit + push
+# Step 7 – git commit + push
 # ---------------------------------------------------------------------------
 
 def git_push(latest_label):
@@ -406,14 +473,17 @@ def main():
     rebuild_source()
 
     print("=== Loading raw data ===")
-    wb_src = load_workbook(str(SOURCE_XLS), data_only=True)
-    ws_raw = wb_src["US_CPI"]
-    ws_wts = wb_src["US_CPI_Weights"]
+    wb_src     = load_workbook(str(SOURCE_XLS), data_only=True)
+    ws_raw     = wb_src["US_CPI"]
+    ws_wts_src = wb_src["US_CPI_Weights"]
 
     raw    = load_raw(ws_raw)
     lc     = last_col(raw)
     latest_label = _col_to_label(lc, ws_raw)
     print(f"Latest month: {latest_label} (col {lc})")
+
+    # date labels for HTML: 6 months newest-first, from SOURCE row 5
+    date_labels = [_col_to_label(lc - i, ws_raw) for i in range(6)]
 
     print("=== Computing variations ===")
     mom   = compute_mom(raw)
@@ -422,11 +492,20 @@ def main():
     yoy   = compute_yoy(raw)
     variations = {"MoM": mom, "MM3MA": mm3ma, "MM6MA": mm6ma, "YoY": yoy}
 
-    print("=== Updating Tabela ===")
-    wb_final   = load_workbook(str(FINAL_XLS))
-    ws_tabela  = wb_final["Tabela"]
-    ws_weights = wb_final["US_CPI_Weights"]
+    print("=== Updating FINAL.xlsx ===")
+    wb_final     = load_workbook(str(FINAL_XLS))
+    ws_tabela    = wb_final["Tabela"]
+    ws_final_raw = wb_final["US_CPI"]
+    ws_weights   = wb_final["US_CPI_Weights"]
 
+    # 1. Extend raw data sheets with new month column(s)
+    print("--- Appending new month to raw sheets ---")
+    copy_new_months_to_final(ws_raw, ws_wts_src, ws_final_raw, ws_weights)
+
+    # 2. Update only D3 in Tabela (E3:I3 are formula-driven and update in Excel)
+    ws_tabela.cell(3, 4).value = latest_label
+
+    # 3. Fill Tabela data rows and colors
     fill_tabela(ws_tabela, ws_weights, variations, lc)
     apply_colors(ws_tabela, variations)
 
@@ -434,9 +513,8 @@ def main():
     print(f"Saved: {FINAL_XLS}")
 
     print("=== Generating HTML ===")
-    # reload to get fill colors (just saved)
     wb2 = load_workbook(str(FINAL_XLS))
-    generate_html(wb2["Tabela"], HTML_OUT, latest_label)
+    generate_html(wb2["Tabela"], HTML_OUT, latest_label, date_labels)
 
     print("=== Git push ===")
     git_push(latest_label)
