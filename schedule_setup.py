@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 """
 Creates Windows Task Scheduler tasks to run update_cpi.py on each BLS CPI
-release date at 20:30 local time (adjust RELEASE_HOUR/MINUTE below to match
-your timezone relative to the BLS release).
+release date at the configured local time.
 
-BLS standard release time: 8:30 AM Eastern Time.
-Adjust LOCAL_HOUR / LOCAL_MINUTE so the task runs after the BLS publishes.
+BLS standard release time: 8:30 AM Eastern Time (9:30 AM BRT, UTC-3).
+Adjust LOCAL_HOUR / LOCAL_MINUTE so the task runs after BLS publishes.
 
 Run once (as Administrator if needed):
     python schedule_setup.py
+
+--- ANNUAL UPDATE (every January) ---
+1. Open https://www.bls.gov/schedule/news_release/cpi.htm in a browser
+2. Copy the 12 release dates for the new year
+3. Add a new RELEASE_DATES_20XX list below (same format as existing ones)
+4. Add it to ALL_DATES
+5. Run: python schedule_setup.py
+NOTE: BLS blocks automated access to this URL — manual copy-paste is required.
 """
 
 import subprocess
@@ -41,6 +48,7 @@ RELEASE_DATES_2026 = [
     "2026-09-11", "2026-10-14", "2026-11-10", "2026-12-10",
 ]
 
+# Add RELEASE_DATES_2027 here each January and include it in ALL_DATES.
 ALL_DATES = RELEASE_DATES_2025 + RELEASE_DATES_2026
 
 
