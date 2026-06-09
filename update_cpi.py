@@ -16,7 +16,8 @@ Usage:
     python update_cpi.py
 """
 
-import os, sys, subprocess, statistics
+import os, sys, subprocess, statistics, calendar
+from datetime import date
 from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
@@ -41,6 +42,17 @@ def match_name(target, source_cats):
             return c
     candidates = [c for c in source_cats if c.strip().lower().startswith(t)]
     return min(candidates, key=len) if candidates else None
+
+
+_MONTH_ABBR = {m.lower(): i for i, m in enumerate(calendar.month_abbr) if m}
+
+def _label_to_date(label):
+    """'Apr-26' → date(2026, 4, 1). Day is always 1."""
+    mon_str, yr_str = label.split("-")
+    mon = _MONTH_ABBR[mon_str.lower()]
+    yr  = int(yr_str)
+    yr  = yr + 2000 if yr < 100 else yr
+    return date(yr, mon, 1)
 
 
 def _col_to_label(col_idx, ws_raw):
@@ -503,7 +515,8 @@ def main():
     copy_new_months_to_final(ws_raw, ws_wts_src, ws_final_raw, ws_weights)
 
     # 2. Update only D3 in Tabela (E3:I3 are formula-driven and update in Excel)
-    ws_tabela.cell(3, 4).value = latest_label
+    ws_tabela.cell(3, 4).value         = _label_to_date(latest_label)
+    ws_tabela.cell(3, 4).number_format = "DD/MM/YYYY"
 
     # 3. Fill Tabela data rows and colors
     fill_tabela(ws_tabela, ws_weights, variations, lc)
