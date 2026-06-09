@@ -1,0 +1,14 @@
+# Output
+US_CPI.xlsx
+*.xlsx
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Editor
+.vscode/
+*.swp
