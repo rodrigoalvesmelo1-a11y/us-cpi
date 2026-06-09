@@ -208,32 +208,57 @@ def fill_tabela(ws_tabela, ws_weights, variations, last_c):
 
 
 # ---------------------------------------------------------------------------
-# Step 4 – apply std-dev colors
+# Step 4 – apply per-row (per-category) std-dev colors
 # ---------------------------------------------------------------------------
 
-COLOR_SECTIONS = [(4, 43), (46, 85), (88, 127), (130, 169)]
+BLOCK_ROWS = [
+    (4,   43,  "MoM"),
+    (46,  85,  "MM3MA"),
+    (88,  127, "MM6MA"),
+    (130, 169, "YoY"),
+]
 
 
-def apply_colors(ws_tabela):
-    for first, last in COLOR_SECTIONS:
-        dists = []
+def _stdev_per_cat(var_block):
+    """Returns {cat: stdev_of_full_historical_series}."""
+    result = {}
+    for cat, d in var_block.items():
+        vals = [v for v in d.values() if isinstance(v, (int, float))]
+        if len(vals) >= 2:
+            result[cat] = statistics.stdev(vals)
+    return result
+
+
+def apply_colors(ws_tabela, variations):
+    """
+    Color scale per category: intensity = min(1.0, |dist| / (2 * stdev_of_that_row's_history)).
+    variations = {"MoM": {cat: {col: val}}, ...} from compute_* functions.
+    """
+    for first, last, block_name in BLOCK_ROWS:
+        sd_lookup = _stdev_per_cat(variations[block_name])
+        sd_src    = list(sd_lookup.keys())
+
         for r in range(first, last + 1):
-            v = ws_tabela.cell(r, 11).value
-            if isinstance(v, (int, float)) and v != 0:
-                dists.append(v)
-        if len(dists) < 2:
-            continue
-        cap = 2.0 * statistics.stdev(dists)
-        if cap < 1e-9:
-            continue
-        for r in range(first, last + 1):
-            v    = ws_tabela.cell(r, 11).value
+            cat  = ws_tabela.cell(r, 2).value
+            dist = ws_tabela.cell(r, 11).value
             cell = ws_tabela.cell(r, 11)
-            if not isinstance(v, (int, float)) or v == 0:
+
+            if not isinstance(dist, (int, float)) or dist == 0:
                 cell.fill = PatternFill(fill_type=None)
                 continue
-            intensity = min(1.0, abs(v) / cap)
-            if v > 0:
+
+            sk = match_name(cat, sd_src)
+            if sk is None:
+                cell.fill = PatternFill(fill_type=None)
+                continue
+
+            cap = 2.0 * sd_lookup[sk]
+            if cap < 1e-9:
+                cell.fill = PatternFill(fill_type=None)
+                continue
+
+            intensity = min(1.0, abs(dist) / cap)
+            if dist > 0:
                 g = b = round(255 * (1.0 - intensity))
                 cell.fill = PatternFill("solid", fgColor=f"FFFF{g:02X}{b:02X}")
             else:
@@ -251,13 +276,6 @@ SECTION_LABELS = {
     "MM6MA": "MM6MA – 6-Month Moving Average of MoM (%)",
     "YoY":   "YoY – Year over Year (%)",
 }
-
-
-def _cell_style(v):
-    if not isinstance(v, (int, float)) or v == 0:
-        return ""
-    # recompute intensity (approximate, for HTML – exact would need per-section cap)
-    return ""  # colors will be read from the filled cells
 
 
 def _argb_to_css(argb):
@@ -410,7 +428,7 @@ def main():
     ws_weights = wb_final["US_CPI_Weights"]
 
     fill_tabela(ws_tabela, ws_weights, variations, lc)
-    apply_colors(ws_tabela)
+    apply_colors(ws_tabela, variations)
 
     wb_final.save(str(FINAL_XLS))
     print(f"Saved: {FINAL_XLS}")
