@@ -82,13 +82,22 @@ def _build_cat_to_row(ws, min_row=6, cat_col=3):
     return result
 
 
-# Formula blocks in US_CPI sheet of FINAL.xlsx (must be extended each new month)
+# Formula blocks in US_CPI sheet of FINAL.xlsx (extended each new month via Translator)
 FORMULA_BLOCKS = [
-    (392,  774),   # MoM
-    (1163, 1545),  # MM3MA
-    (1549, 1931),  # MM6MA
-    (1935, 2317),  # YoY
+    (392,  774),   # block 1 (intermediate)
+    (778,  1160),  # MoM (%) — source for Tabela
+    (1163, 1545),  # MM3MA   — source for Tabela
+    (1549, 1931),  # MM6MA   — source for Tabela
+    (1935, 2317),  # YoY     — source for Tabela
 ]
+
+# Row ranges to READ from FINAL.xlsx US_CPI (data_only=True) for each variation type
+VARIATION_READ_BLOCKS = {
+    "MoM":   (778,  1160),
+    "MM3MA": (1163, 1545),
+    "MM6MA": (1549, 1931),
+    "YoY":   (1935, 2317),
+}
 
 
 def _last_formula_col(ws):
@@ -114,6 +123,45 @@ def _extend_formula_blocks(ws, new_cols, ref_col):
             for c in new_cols:
                 t = Translator(str(ref_val), origin=ref_cell.coordinate)
                 ws.cell(r, c).value = t.translate_formula(ws.cell(r, c).coordinate)
+
+
+def read_variation_block(ws_do, row_start, row_end, max_col):
+    """
+    Read cached formula values from a US_CPI variation block (data_only workbook).
+    Returns {category: {col_idx: float}} — only columns with numeric cached values.
+    """
+    result = {}
+    for row in ws_do.iter_rows(min_row=row_start, max_row=row_end,
+                                min_col=3, max_col=max_col, values_only=True):
+        cat = row[0]
+        if cat is None:
+            continue
+        row_data = {}
+        for i, v in enumerate(row[1:], start=4):
+            if isinstance(v, (int, float)):
+                row_data[i] = v
+        if row_data:
+            result[str(cat).strip()] = row_data
+    return result
+
+
+def _merge_variations(python_var, excel_var):
+    """
+    Merge Excel formula block values with Python-computed values.
+    Excel values take priority (authoritative for cached months).
+    Python fills columns not yet cached in Excel (the new month just added).
+    """
+    merged = {}
+    for block in ["MoM", "MM3MA", "MM6MA", "YoY"]:
+        m = {}
+        py_b = python_var.get(block, {})
+        ex_b = excel_var.get(block, {})
+        for cat in set(py_b) | set(ex_b):
+            combined = dict(py_b.get(cat, {}))
+            combined.update(ex_b.get(cat, {}))  # Excel overrides where cached
+            m[cat] = combined
+        merged[block] = m
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -546,12 +594,23 @@ def main():
     # date labels for HTML: 6 months newest-first, from SOURCE row 5
     date_labels = [_col_to_label(lc - i, ws_raw) for i in range(6)]
 
-    print("=== Computing variations ===")
+    print("=== Computing Python variations (fallback for uncached new month) ===")
     mom   = compute_mom(raw)
     mm3ma = compute_mma(mom, 3)
     mm6ma = compute_mma(mom, 6)
     yoy   = compute_yoy(raw)
-    variations = {"MoM": mom, "MM3MA": mm3ma, "MM6MA": mm6ma, "YoY": yoy}
+    python_variations = {"MoM": mom, "MM3MA": mm3ma, "MM6MA": mm6ma, "YoY": yoy}
+
+    print("=== Reading variation blocks from FINAL.xlsx (Excel-cached values) ===")
+    wb_do = load_workbook(str(FINAL_XLS), data_only=True)
+    ws_do = wb_do["US_CPI"]
+    excel_variations = {}
+    for block, (r0, r1) in VARIATION_READ_BLOCKS.items():
+        excel_variations[block] = read_variation_block(ws_do, r0, r1, lc)
+        print(f"  {block}: {len(excel_variations[block])} categories (rows {r0}-{r1})")
+    del wb_do
+
+    variations = _merge_variations(python_variations, excel_variations)
 
     print("=== Updating FINAL.xlsx ===")
     wb_final     = load_workbook(str(FINAL_XLS))
