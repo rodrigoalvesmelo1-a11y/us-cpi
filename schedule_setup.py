@@ -37,7 +37,7 @@ RELEASE_DATES_2025 = [
 
 RELEASE_DATES_2026 = [
     "2026-01-14", "2026-02-11", "2026-03-11", "2026-04-10",
-    "2026-05-13", "2026-06-11", "2026-07-15", "2026-08-12",
+    "2026-05-13", "2026-06-10", "2026-07-15", "2026-08-12",
     "2026-09-10", "2026-10-14", "2026-11-12", "2026-12-10",
 ]
 
@@ -48,9 +48,9 @@ def create_task(date_str: str):
     task_name = f"CPI_Update_{date_str}"
     start_time = f"{LOCAL_HOUR:02d}:{LOCAL_MINUTE:02d}"
 
-    # schtasks expects date as MM/DD/YYYY
+    # schtasks date format depends on locale; use DD/MM/YYYY for PT-BR Windows
     y, m, d = date_str.split("-")
-    start_date = f"{m}/{d}/{y}"
+    start_date = f"{d}/{m}/{y}"
 
     cmd = [
         "schtasks", "/create",
