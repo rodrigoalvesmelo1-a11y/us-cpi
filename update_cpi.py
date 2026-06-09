@@ -93,7 +93,7 @@ FORMULA_BLOCKS = [
 
 # Row ranges to READ from FINAL.xlsx US_CPI (data_only=True) for each variation type
 VARIATION_READ_BLOCKS = {
-    "MoM":   (778,  1160),
+    "MoM":   (392,  774),
     "MM3MA": (1163, 1545),
     "MM6MA": (1549, 1931),
     "YoY":   (1935, 2317),
@@ -162,6 +162,34 @@ def _merge_variations(python_var, excel_var):
             m[cat] = combined
         merged[block] = m
     return merged
+
+
+def _excel_recalculate(xls_path):
+    """
+    Open xls_path in Excel (COM), force recalculation of all formulas, save, close.
+    Restores the formula cache that openpyxl clears on every save.
+    Safe to call when other Excel files are already open (only quits if we launched Excel).
+    """
+    try:
+        import win32com.client
+        try:
+            excel = win32com.client.GetActiveObject("Excel.Application")
+            launched = False
+        except Exception:
+            excel = win32com.client.Dispatch("Excel.Application")
+            launched = True
+
+        excel.Visible = False
+        excel.DisplayAlerts = False
+        wb = excel.Workbooks.Open(str(xls_path.resolve()))
+        excel.Calculate()
+        wb.Save()
+        wb.Close(False)
+        if launched:
+            excel.Quit()
+        print("  Formula cache refreshed via Excel.")
+    except Exception as exc:
+        print(f"  Warning: Excel recalculation skipped ({exc}) — Python fallback used.")
 
 
 # ---------------------------------------------------------------------------
@@ -601,6 +629,9 @@ def main():
     yoy   = compute_yoy(raw)
     python_variations = {"MoM": mom, "MM3MA": mm3ma, "MM6MA": mm6ma, "YoY": yoy}
 
+    print("=== Refreshing FINAL.xlsx formula cache (Excel recalculation) ===")
+    _excel_recalculate(FINAL_XLS)
+
     print("=== Reading variation blocks from FINAL.xlsx (Excel-cached values) ===")
     wb_do = load_workbook(str(FINAL_XLS), data_only=True)
     ws_do = wb_do["US_CPI"]
@@ -632,6 +663,9 @@ def main():
 
     wb_final.save(str(FINAL_XLS))
     print(f"Saved: {FINAL_XLS}")
+
+    print("=== Refreshing formula cache after openpyxl save ===")
+    _excel_recalculate(FINAL_XLS)
 
     print("=== Generating HTML ===")
     wb2 = load_workbook(str(FINAL_XLS))
