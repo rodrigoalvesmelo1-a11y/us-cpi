@@ -21,6 +21,7 @@ from datetime import date
 from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
+from openpyxl.formula.translate import Translator
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -70,13 +71,49 @@ def _last_date_col(ws):
 
 
 def _build_cat_to_row(ws, min_row=6, cat_col=3):
-    """Map category name → row number in ws (exact match)."""
+    """Map category name → first row number in ws (raw data rows only — first occurrence wins)."""
     result = {}
     for r in range(min_row, ws.max_row + 1):
         cat = ws.cell(r, cat_col).value
         if cat is not None:
-            result[str(cat).strip()] = r
+            key = str(cat).strip()
+            if key not in result:
+                result[key] = r
     return result
+
+
+# Formula blocks in US_CPI sheet of FINAL.xlsx (must be extended each new month)
+FORMULA_BLOCKS = [
+    (392,  774),   # MoM
+    (1163, 1545),  # MM3MA
+    (1549, 1931),  # MM6MA
+    (1935, 2317),  # YoY
+]
+
+
+def _last_formula_col(ws):
+    """Return the rightmost column that has content in the first row of any formula block. 0 = none found."""
+    max_col = 0
+    for first_row, _ in FORMULA_BLOCKS:
+        for c in range(ws.max_column, 3, -1):
+            if ws.cell(first_row, c).value is not None:
+                if c > max_col:
+                    max_col = c
+                break
+    return max_col
+
+
+def _extend_formula_blocks(ws, new_cols, ref_col):
+    """Translate each formula block row from ref_col to every column in new_cols."""
+    for first_row, last_row in FORMULA_BLOCKS:
+        for r in range(first_row, last_row + 1):
+            ref_cell = ws.cell(r, ref_col)
+            ref_val  = ref_cell.value
+            if ref_val is None or not str(ref_val).startswith("="):
+                continue
+            for c in new_cols:
+                t = Translator(str(ref_val), origin=ref_cell.coordinate)
+                ws.cell(r, c).value = t.translate_formula(ws.cell(r, c).coordinate)
 
 
 # ---------------------------------------------------------------------------
@@ -104,48 +141,60 @@ def copy_new_months_to_final(ws_src_raw, ws_src_wts, ws_final_raw, ws_final_wts)
     Appends any new month columns from SOURCE into FINAL's US_CPI and
     US_CPI_Weights sheets. Never overwrites existing data — only extends.
 
-    Row 5  = date headers (extended for each new month)
-    Rows 6+ = index / weight values (matched by category name in col 3)
+    Row 5        = date headers
+    Rows 6–391   = raw index / weight values (matched by category name, first occurrence)
+    Rows 392+    = formula blocks — extended via Translator (never overwritten with values)
     """
     final_lc = _last_date_col(ws_final_raw)
     src_lc   = _last_date_col(ws_src_raw)
 
-    if src_lc <= final_lc:
+    # --- raw data + weights ---
+    if src_lc > final_lc:
+        new_cols = list(range(final_lc + 1, src_lc + 1))
+        print(f"  Appending {len(new_cols)} new month(s) to FINAL: col {new_cols[0]}..{new_cols[-1]}")
+
+        # extend date headers in row 5
+        for c in new_cols:
+            ws_final_raw.cell(5, c).value = ws_src_raw.cell(5, c).value
+            ws_final_wts.cell(5, c).value = (ws_src_wts.cell(5, c).value
+                                              or ws_src_raw.cell(5, c).value)
+
+        # append raw index values — first occurrence maps to raw data rows (6–391)
+        final_rows = _build_cat_to_row(ws_final_raw)
+        for r_src in range(6, ws_src_raw.max_row + 1):
+            cat = ws_src_raw.cell(r_src, 3).value
+            if cat is None:
+                continue
+            r_fin = final_rows.get(str(cat).strip())
+            if r_fin is None:
+                continue
+            for c in new_cols:
+                ws_final_raw.cell(r_fin, c).value = ws_src_raw.cell(r_src, c).value
+
+        # append weight values
+        final_wt_rows = _build_cat_to_row(ws_final_wts)
+        for r_src in range(6, ws_src_wts.max_row + 1):
+            cat = ws_src_wts.cell(r_src, 3).value
+            if cat is None:
+                continue
+            r_fin = final_wt_rows.get(str(cat).strip())
+            if r_fin is None:
+                continue
+            for c in new_cols:
+                ws_final_wts.cell(r_fin, c).value = ws_src_wts.cell(r_src, c).value
+    else:
         print(f"  FINAL raw data already current (last col = {final_lc})")
-        return
 
-    new_cols = list(range(final_lc + 1, src_lc + 1))
-    print(f"  Appending {len(new_cols)} new month(s) to FINAL: col {new_cols[0]}..{new_cols[-1]}")
-
-    # extend date headers in row 5
-    for c in new_cols:
-        ws_final_raw.cell(5, c).value = ws_src_raw.cell(5, c).value
-        ws_final_wts.cell(5, c).value = (ws_src_wts.cell(5, c).value
-                                          or ws_src_raw.cell(5, c).value)
-
-    # append index values (US_CPI sheet), matched by category name
-    final_rows = _build_cat_to_row(ws_final_raw)
-    for r_src in range(6, ws_src_raw.max_row + 1):
-        cat = ws_src_raw.cell(r_src, 3).value
-        if cat is None:
-            continue
-        r_fin = final_rows.get(str(cat).strip())
-        if r_fin is None:
-            continue
-        for c in new_cols:
-            ws_final_raw.cell(r_fin, c).value = ws_src_raw.cell(r_src, c).value
-
-    # append weight values (US_CPI_Weights sheet)
-    final_wt_rows = _build_cat_to_row(ws_final_wts)
-    for r_src in range(6, ws_src_wts.max_row + 1):
-        cat = ws_src_wts.cell(r_src, 3).value
-        if cat is None:
-            continue
-        r_fin = final_wt_rows.get(str(cat).strip())
-        if r_fin is None:
-            continue
-        for c in new_cols:
-            ws_final_wts.cell(r_fin, c).value = ws_src_wts.cell(r_src, c).value
+    # --- formula blocks (checked independently — may lag behind raw data) ---
+    formula_lc = _last_formula_col(ws_final_raw)
+    if formula_lc == 0:
+        print("  No formula blocks found in FINAL — skipping formula extension")
+    elif formula_lc < src_lc:
+        f_new = list(range(formula_lc + 1, src_lc + 1))
+        print(f"  Extending formula blocks: col {f_new[0]}..{f_new[-1]}")
+        _extend_formula_blocks(ws_final_raw, f_new, formula_lc)
+    else:
+        print(f"  Formula blocks already current (last col = {formula_lc})")
 
 
 # ---------------------------------------------------------------------------
