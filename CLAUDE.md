@@ -53,6 +53,7 @@ script falls back to Python-computed values (less accurate for MM3MA/MM6MA/YoY).
 - **Row 5**: date headers (`Jan-00`, `Feb-00`, …). Col 4 = Jan-2000.
 - **Rows 6–391**: raw CPI-U index values. Col C = category name, col D+ = monthly values.
 - **Rows 392+**: Excel formula blocks — never overwrite with Python values.
+- **Rows 2320–2324**: custom metric (Python-computed, written by `compute_and_write_custom_metric()`).
 
 | Metric | Row range |
 |---|---|
@@ -60,6 +61,11 @@ script falls back to Python-computed values (less accurate for MM3MA/MM6MA/YoY).
 | MM3MA | 1163–1545 |
 | MM6MA | 1549–1931 |
 | YoY | 1935–2317 |
+| Core Services Ex-Rent & OER — MoM | 2320 |
+| Core Services Ex-Rent & OER — MoMA | 2321 |
+| Core Services Ex-Rent & OER — MM3MA | 2322 |
+| Core Services Ex-Rent & OER — MM6MA | 2323 |
+| Core Services Ex-Rent & OER — YoY | 2324 |
 
 ### Tabela sheet layout
 
@@ -100,10 +106,11 @@ E3:I3 update automatically via Excel formulas.
 9. **Write D3** — `_label_to_date(latest_label)` with `number_format = "DD/MM/YYYY"`.
 10. **`fill_tabela()`** — writes cols C–K for all 160 data rows.
 11. **`apply_colors()`** — colors col K: red = above avg, blue = below. Cap at 2σ per category.
-12. **`wb_final.save()`** — saves FINAL.xlsx (clears formula cache).
-13. **`_extend_and_recalculate(FINAL_XLS, formula_lc, new_formula_cols)`** *(post-save)* — uses Excel COM AutoFill to extend formula blocks to the new column, then recalculates and saves. Replaces the unreliable openpyxl Translator approach.
-14. **`generate_html()`** — writes `cpi_table.html`.
-15. **`git_push()`** — commits `cpi_table.html` + `CLAUDE.md` and pushes to `origin master`.
+12. **`compute_and_write_custom_metric(ws_raw, ws_wts_src, ws_final_raw, lc)`** — writes "Core Services Ex-Primary Rent & OER" to rows 2320–2324. Reads index data from SOURCE (data_only=True — float values, not formula strings); uses time-varying December RI weights from SOURCE US_CPI_Weights. See [Custom metric](#custom-metric-core-services-ex-primary-rent--oer) below.
+13. **`wb_final.save()`** — saves FINAL.xlsx (clears formula cache).
+14. **`_extend_and_recalculate(FINAL_XLS, formula_lc, new_formula_cols)`** *(post-save)* — uses Excel COM AutoFill to extend formula blocks to the new column, then recalculates and saves. Replaces the unreliable openpyxl Translator approach.
+15. **`generate_html()`** — writes `cpi_table.html`.
+16. **`git_push()`** — commits `cpi_table.html` + `CLAUDE.md` and pushes to `origin master`.
 
 ### Excel COM recalculation
 
@@ -194,6 +201,66 @@ python schedule_setup.py
 `download.bls.gov` returns 403 for all scripts. Only `api.bls.gov/publicAPI/v2/timeseries/data/`
 works programmatically. Relative Importance available from December 2012 via `aspects=True`.
 The schedule page (`www.bls.gov/schedule/...`) also blocks automated access — use a browser.
+
+---
+
+## Custom metric: Core Services Ex-Primary Rent & OER
+
+Written to rows 2320–2324 of the US_CPI sheet by `compute_and_write_custom_metric()`.
+
+### Formula
+
+Top-down exclusion from the Services aggregate:
+
+```
+I_core = (I_svc × w_svc − I_rent × w_rent − I_oer × w_oer) / (w_svc − w_rent − w_oer)
+```
+
+Where:
+- `I_svc`  = Services less energy services index
+- `I_rent` = Rent of primary residence index
+- `I_oer`  = Owners' equivalent rent of residences index
+- Weights = December Relative Importance (RI) from US_CPI_Weights
+
+### Constants
+
+```python
+CUSTOM_METRIC_LABEL    = "Core Services Ex-Primary Rent & OER"
+CUSTOM_METRIC_START    = 2320
+CUSTOM_METRIC_SVC_CAT  = "Services less energy services"
+CUSTOM_METRIC_RENT_CAT = "Rent of primary residence"
+CUSTOM_METRIC_OER_CAT  = "Owners' equivalent rent of residences"
+```
+
+### Weight lookup
+
+- December RI available from December 2012 (in `US_CPI_Weights`).
+- Each column c uses the **most recent** December RI at or before that column.
+- For columns before the earliest available RI (pre-2013), falls back to the earliest available.
+
+### Variations computed
+
+| Row | Metric |
+|---|---|
+| 2320 | MoM (%) |
+| 2321 | MoMA — MoM Annualized: `((1 + MoM/100)^12 − 1) × 100` |
+| 2322 | MM3MA — 3-month moving avg of MoM |
+| 2323 | MM6MA — 6-month moving avg of MoM |
+| 2324 | YoY (%) |
+
+### Important: data source
+
+`compute_and_write_custom_metric` reads index values from **SOURCE** (`US_CPI.xlsx`, data_only=True) — not from FINAL.xlsx. FINAL rows 6–391 contain Excel formulas (not values) in template columns; openpyxl returns formula strings, not floats. SOURCE always contains real float values from the BLS API.
+
+---
+
+## Formula block extension
+
+`_extend_and_recalculate(xls_path, formula_lc, new_cols)` extends Excel formula blocks via COM AutoFill — not via openpyxl Translator. The Translator was removed because it silently returns `None` for complex formulas, erasing existing cells.
+
+Architecture: `copy_new_months_to_final()` **detects** what needs extending and returns `(formula_lc, new_formula_cols)`. The actual extension + recalculation is done in a single COM pass **after** the openpyxl save.
+
+Formula blocks pre-exist in FINAL.xlsx through col 901 (~2072). `new_cols` is only non-empty when the pipeline goes beyond col 901.
 
 ---
 
