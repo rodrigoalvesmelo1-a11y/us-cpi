@@ -96,12 +96,12 @@ E3:I3 update automatically via Excel formulas.
 5. **Read variation blocks** — `data_only=True` reads cached values from formula block rows (392–774, 1163–1545, 1549–1931, 1935–2317).
 6. **`_merge_variations()`** — Excel values override Python column-by-column. New month (not yet cached) comes from Python.
 7. **Load FINAL normally** — for writing.
-8. **`copy_new_months_to_final()`** — appends new month column(s) to raw rows 6–391. Formula blocks extended via `Translator` (never overwritten with values).
+8. **`copy_new_months_to_final()`** — appends new month column(s) to raw rows 6–391. Returns `(formula_lc, new_formula_cols)` for post-save COM extension.
 9. **Write D3** — `_label_to_date(latest_label)` with `number_format = "DD/MM/YYYY"`.
 10. **`fill_tabela()`** — writes cols C–K for all 160 data rows.
 11. **`apply_colors()`** — colors col K: red = above avg, blue = below. Cap at 2σ per category.
 12. **`wb_final.save()`** — saves FINAL.xlsx (clears formula cache).
-13. **`_excel_recalculate(FINAL_XLS)`** *(post-save)* — restores formula cache again.
+13. **`_extend_and_recalculate(FINAL_XLS, formula_lc, new_formula_cols)`** *(post-save)* — uses Excel COM AutoFill to extend formula blocks to the new column, then recalculates and saves. Replaces the unreliable openpyxl Translator approach.
 14. **`generate_html()`** — writes `cpi_table.html`.
 15. **`git_push()`** — commits `cpi_table.html` + `CLAUDE.md` and pushes to `origin master`.
 

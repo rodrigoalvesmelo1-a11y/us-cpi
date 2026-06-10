@@ -21,7 +21,6 @@ from datetime import date
 from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
-from openpyxl.formula.translate import Translator
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -112,19 +111,6 @@ def _last_formula_col(ws):
     return max_col
 
 
-def _extend_formula_blocks(ws, new_cols, ref_col):
-    """Translate each formula block row from ref_col to every column in new_cols."""
-    for first_row, last_row in FORMULA_BLOCKS:
-        for r in range(first_row, last_row + 1):
-            ref_cell = ws.cell(r, ref_col)
-            ref_val  = ref_cell.value
-            if ref_val is None or not str(ref_val).startswith("="):
-                continue
-            for c in new_cols:
-                t = Translator(str(ref_val), origin=ref_cell.coordinate)
-                ws.cell(r, c).value = t.translate_formula(ws.cell(r, c).coordinate)
-
-
 def read_variation_block(ws_do, row_start, row_end, max_col):
     """
     Read cached formula values from a US_CPI variation block (data_only workbook).
@@ -192,6 +178,45 @@ def _excel_recalculate(xls_path):
         print(f"  Warning: Excel recalculation skipped ({exc}) — Python fallback used.")
 
 
+def _extend_and_recalculate(xls_path, formula_lc=0, new_cols=None):
+    """
+    Extend formula blocks via Excel COM AutoFill (if new_cols given), then recalculate.
+    Called after openpyxl save. More reliable than openpyxl Translator for complex formulas.
+    """
+    try:
+        import win32com.client
+        try:
+            excel = win32com.client.GetActiveObject("Excel.Application")
+            launched = False
+        except Exception:
+            excel = win32com.client.Dispatch("Excel.Application")
+            launched = True
+
+        excel.Visible = False
+        excel.DisplayAlerts = False
+        wb = excel.Workbooks.Open(str(xls_path.resolve()))
+
+        if new_cols:
+            ws = wb.Sheets("US_CPI")
+            last_new = max(new_cols)
+            for first_row, last_row in FORMULA_BLOCKS:
+                src_rng  = ws.Range(ws.Cells(first_row, formula_lc),
+                                    ws.Cells(last_row,  formula_lc))
+                fill_rng = ws.Range(ws.Cells(first_row, formula_lc),
+                                    ws.Cells(last_row,  last_new))
+                src_rng.AutoFill(fill_rng, 0)  # xlFillDefault = 0
+            print(f"  Formula blocks extended to col {last_new} via Excel COM.")
+
+        excel.Calculate()
+        wb.Save()
+        wb.Close(False)
+        if launched:
+            excel.Quit()
+        print("  Formula cache refreshed via Excel.")
+    except Exception as exc:
+        print(f"  Warning: Excel COM operation skipped ({exc}) — Python fallback used.")
+
+
 # ---------------------------------------------------------------------------
 # Step 1 – fetch fresh raw data
 # ---------------------------------------------------------------------------
@@ -219,7 +244,7 @@ def copy_new_months_to_final(ws_src_raw, ws_src_wts, ws_final_raw, ws_final_wts)
 
     Row 5        = date headers
     Rows 6–391   = raw index / weight values (matched by category name, first occurrence)
-    Rows 392+    = formula blocks — extended via Translator (never overwritten with values)
+    Rows 392+    = formula blocks — extended via COM AutoFill after save (never overwritten with values)
     """
     final_lc = _last_date_col(ws_final_raw)
     src_lc   = _last_date_col(ws_src_raw)
@@ -261,16 +286,17 @@ def copy_new_months_to_final(ws_src_raw, ws_src_wts, ws_final_raw, ws_final_wts)
     else:
         print(f"  FINAL raw data already current (last col = {final_lc})")
 
-    # --- formula blocks (checked independently — may lag behind raw data) ---
+    # --- formula blocks (detected here; extended via COM AutoFill after save) ---
     formula_lc = _last_formula_col(ws_final_raw)
+    new_formula_cols = []
     if formula_lc == 0:
         print("  No formula blocks found in FINAL — skipping formula extension")
     elif formula_lc < src_lc:
-        f_new = list(range(formula_lc + 1, src_lc + 1))
-        print(f"  Extending formula blocks: col {f_new[0]}..{f_new[-1]}")
-        _extend_formula_blocks(ws_final_raw, f_new, formula_lc)
+        new_formula_cols = list(range(formula_lc + 1, src_lc + 1))
+        print(f"  Formula blocks will be extended: col {new_formula_cols[0]}..{new_formula_cols[-1]} (via Excel COM)")
     else:
         print(f"  Formula blocks already current (last col = {formula_lc})")
+    return formula_lc, new_formula_cols
 
 
 # ---------------------------------------------------------------------------
@@ -651,7 +677,7 @@ def main():
 
     # 1. Extend raw data sheets with new month column(s)
     print("--- Appending new month to raw sheets ---")
-    copy_new_months_to_final(ws_raw, ws_wts_src, ws_final_raw, ws_weights)
+    formula_lc, new_formula_cols = copy_new_months_to_final(ws_raw, ws_wts_src, ws_final_raw, ws_weights)
 
     # 2. Update only D3 in Tabela (E3:I3 are formula-driven and update in Excel)
     ws_tabela.cell(3, 4).value         = _label_to_date(latest_label)
@@ -664,8 +690,8 @@ def main():
     wb_final.save(str(FINAL_XLS))
     print(f"Saved: {FINAL_XLS}")
 
-    print("=== Refreshing formula cache after openpyxl save ===")
-    _excel_recalculate(FINAL_XLS)
+    print("=== Extending formula blocks and refreshing cache (Excel COM) ===")
+    _extend_and_recalculate(FINAL_XLS, formula_lc, new_formula_cols)
 
     print("=== Generating HTML ===")
     wb2 = load_workbook(str(FINAL_XLS))
