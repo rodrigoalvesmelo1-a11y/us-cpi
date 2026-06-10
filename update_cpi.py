@@ -16,7 +16,7 @@ Usage:
     python update_cpi.py
 """
 
-import os, sys, subprocess, statistics, calendar
+import os, sys, subprocess, statistics, calendar, time
 from datetime import date
 from pathlib import Path
 from openpyxl import load_workbook
@@ -88,6 +88,10 @@ CUSTOM_METRIC_START    = 2320   # first row written in US_CPI sheet
 CUSTOM_METRIC_SVC_CAT  = "Services less energy services"
 CUSTOM_METRIC_RENT_CAT = "Rent of primary residence"
 CUSTOM_METRIC_OER_CAT  = "Owners' equivalent rent of residences"
+
+# Retry settings for BLS API availability check
+RETRY_MAX  = 3    # max build attempts before giving up and proceeding with current data
+RETRY_WAIT = 300  # seconds between retries (5 min)
 
 # Formula blocks in US_CPI sheet of FINAL.xlsx (extended each new month via COM AutoFill)
 FORMULA_BLOCKS = [
@@ -229,8 +233,7 @@ def _extend_and_recalculate(xls_path, formula_lc=0, new_cols=None):
 # Step 1 – fetch fresh raw data
 # ---------------------------------------------------------------------------
 
-def rebuild_source():
-    print("=== Running build_us_cpi.py ===")
+def _run_build():
     result = subprocess.run(
         [sys.executable, str(REPO_DIR / "build_us_cpi.py")],
         cwd=str(REPO_DIR)
@@ -238,7 +241,60 @@ def rebuild_source():
     if result.returncode != 0:
         print("ERROR: build_us_cpi.py failed.")
         sys.exit(1)
-    print("build_us_cpi.py done.\n")
+
+
+def _source_latest_label():
+    """Return the latest date label in SOURCE (US_CPI.xlsx), or None if unreadable."""
+    try:
+        wb = load_workbook(str(SOURCE_XLS), data_only=True, read_only=True)
+        lc = _last_date_col(wb["US_CPI"])
+        label = wb["US_CPI"].cell(5, lc).value if lc > 3 else None
+        wb.close()
+        return str(label).strip() if label else None
+    except Exception:
+        return None
+
+
+def _final_latest_label():
+    """Return the latest date label already in FINAL.xlsx, or None if unreadable."""
+    try:
+        wb = load_workbook(str(FINAL_XLS), data_only=True, read_only=True)
+        lc = _last_date_col(wb["US_CPI"])
+        label = wb["US_CPI"].cell(5, lc).value if lc > 3 else None
+        wb.close()
+        return str(label).strip() if label else None
+    except Exception:
+        return None
+
+
+def rebuild_source():
+    """
+    Run build_us_cpi.py, retrying up to RETRY_MAX times if the BLS API does not
+    yet have a month newer than what is already in FINAL.xlsx.
+
+    This allows the scheduler to fire close to the 9:30 AM BRT release time without
+    risking a no-op: if the API is not updated yet, the script waits RETRY_WAIT
+    seconds and tries again before giving up.
+    """
+    print("=== Running build_us_cpi.py ===")
+    current = _final_latest_label()
+    print(f"  FINAL currently at: {current or 'unknown'}")
+
+    for attempt in range(1, RETRY_MAX + 1):
+        if attempt > 1:
+            print(f"  Retry {attempt}/{RETRY_MAX}...")
+        _run_build()
+        src = _source_latest_label()
+        if src and src != current:
+            print(f"  New month detected: {src}. Proceeding.\n")
+            return
+        if attempt < RETRY_MAX:
+            wait_min = RETRY_WAIT // 60
+            print(f"  No new month yet (SOURCE still at {src}). "
+                  f"Waiting {wait_min} min before retry...")
+            time.sleep(RETRY_WAIT)
+
+    print(f"  No new month after {RETRY_MAX} attempts — proceeding with current data.\n")
 
 
 # ---------------------------------------------------------------------------

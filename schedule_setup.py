@@ -29,9 +29,10 @@ SCRIPT   = REPO_DIR / "update_cpi.py"
 # Adjust these for your local timezone:
 #   BLS releases at 8:30 AM ET. Eastern Daylight Time = UTC-4.
 #   If you are in BRT (UTC-3): 8:30 AM ET = 9:30 AM BRT.
-#   Using 10:00 AM local time gives a ~30-min buffer after BLS publishes.
-LOCAL_HOUR   = 10   # local hour to run the task
-LOCAL_MINUTE = 0    # local minute
+#   Running at 9:32 AM BRT — update_cpi.py retries up to 3x (5 min apart)
+#   if the BLS API is not yet updated, so no hard buffer needed here.
+LOCAL_HOUR   = 9    # local hour to run the task
+LOCAL_MINUTE = 32   # local minute
 
 # BLS CPI release dates for 2025–2026 (release date, not reference month).
 # Source: https://www.bls.gov/schedule/news_release/cpi.htm
