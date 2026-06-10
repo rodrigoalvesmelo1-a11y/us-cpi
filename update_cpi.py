@@ -81,7 +81,15 @@ def _build_cat_to_row(ws, min_row=6, cat_col=3):
     return result
 
 
-# Formula blocks in US_CPI sheet of FINAL.xlsx (extended each new month via Translator)
+# Custom metric: Core Services Excluding Primary Rent and OER
+# Index (top-down): I_core = (I_svc*w_svc - I_rent*w_rent - I_oer*w_oer) / (w_svc - w_rent - w_oer)
+CUSTOM_METRIC_LABEL    = "Core Services Ex-Primary Rent & OER"
+CUSTOM_METRIC_START    = 2320   # first row written in US_CPI sheet
+CUSTOM_METRIC_SVC_CAT  = "Services less energy services"
+CUSTOM_METRIC_RENT_CAT = "Rent of primary residence"
+CUSTOM_METRIC_OER_CAT  = "Owners' equivalent rent of residences"
+
+# Formula blocks in US_CPI sheet of FINAL.xlsx (extended each new month via COM AutoFill)
 FORMULA_BLOCKS = [
     (392,  774),   # block 1 (intermediate)
     (778,  1160),  # MoM (%) — source for Tabela
@@ -610,6 +618,158 @@ blue = below. Intensity scale capped at ±2σ per category historical series.</p
 
 
 # ---------------------------------------------------------------------------
+# Step 6b – custom metric: Core Services Ex-Primary Rent & OER
+# ---------------------------------------------------------------------------
+
+def compute_and_write_custom_metric(ws_src_raw, ws_src_weights, ws_write_raw, max_col):
+    """
+    Builds the 'Core Services Ex-Primary Rent & OER' index via top-down exclusion:
+        I_core = (I_svc*w_svc - I_rent*w_rent - I_oer*w_oer) / (w_svc - w_rent - w_oer)
+
+    ws_src_raw / ws_src_weights : SOURCE sheets loaded data_only=True (float values, not formulas).
+    ws_write_raw                : FINAL US_CPI sheet to write computed rows into.
+
+    Weights: most recent December RI available at or before each month column.
+    For periods before the earliest available December RI, uses that earliest RI as fallback.
+
+    Writes 5 rows starting at CUSTOM_METRIC_START (2320):
+        MoM, MoM Annualized, MM3MA, MM6MA, YoY
+    """
+    # --- 1. col → (year, month) from SOURCE row 5 headers ---
+    col_date = {}
+    for c in range(4, max_col + 1):
+        label = ws_src_raw.cell(5, c).value
+        if label:
+            try:
+                d = _label_to_date(str(label))
+                col_date[c] = (d.year, d.month)
+            except Exception:
+                pass
+
+    # --- 2. locate category rows in SOURCE raw data (first occurrence, all rows) ---
+    cat_row = {}
+    for r in range(6, ws_src_raw.max_row + 1):
+        cat = ws_src_raw.cell(r, 3).value
+        if cat is not None:
+            k = str(cat).strip()
+            if k not in cat_row:
+                cat_row[k] = r
+
+    # Use prefix match so footnote suffixes like (17) don't break lookup
+    all_cats = list(cat_row.keys())
+    svc_key  = match_name(CUSTOM_METRIC_SVC_CAT,  all_cats)
+    rent_key = match_name(CUSTOM_METRIC_RENT_CAT, all_cats)
+    oer_key  = match_name(CUSTOM_METRIC_OER_CAT,  all_cats)
+    r_svc    = cat_row.get(svc_key)  if svc_key  else None
+    r_rent   = cat_row.get(rent_key) if rent_key else None
+    r_oer    = cat_row.get(oer_key)  if oer_key  else None
+    if None in (r_svc, r_rent, r_oer):
+        missing = [n for n, r2 in ((CUSTOM_METRIC_SVC_CAT, r_svc),
+                                    (CUSTOM_METRIC_RENT_CAT, r_rent),
+                                    (CUSTOM_METRIC_OER_CAT, r_oer)) if r2 is None]
+        print(f"  Warning: custom metric skipped — not found in SOURCE US_CPI: {missing}")
+        return
+
+    # --- 3. read index values from SOURCE (data_only=True → actual floats, not formula strings) ---
+    def read_row(ws, r):
+        return {c: ws.cell(r, c).value for c in range(4, max_col + 1)
+                if isinstance(ws.cell(r, c).value, (int, float))}
+
+    idx_svc  = read_row(ws_src_raw, r_svc)
+    idx_rent = read_row(ws_src_raw, r_rent)
+    idx_oer  = read_row(ws_src_raw, r_oer)
+
+    # --- 4. read weight series from SOURCE US_CPI_Weights (annual December RI) ---
+    wt_cat_row = {}
+    for r in range(6, ws_src_weights.max_row + 1):
+        cat = ws_src_weights.cell(r, 3).value
+        if cat is not None:
+            wt_cat_row[str(cat).strip()] = r
+
+    wt_all_cats = list(wt_cat_row.keys())
+
+    def read_wt_row(target_cat):
+        key = match_name(target_cat, wt_all_cats)
+        r   = wt_cat_row.get(key) if key else None
+        if r is None:
+            return {}
+        return {c: ws_src_weights.cell(r, c).value
+                for c in range(4, ws_src_weights.max_column + 1)
+                if isinstance(ws_src_weights.cell(r, c).value, (int, float))}
+
+    wts_svc  = read_wt_row(CUSTOM_METRIC_SVC_CAT)
+    wts_rent = read_wt_row(CUSTOM_METRIC_RENT_CAT)
+    wts_oer  = read_wt_row(CUSTOM_METRIC_OER_CAT)
+    if not (wts_svc and wts_rent and wts_oer):
+        print("  Warning: custom metric skipped — weights not found in SOURCE US_CPI_Weights")
+        return
+
+    # --- 5. weight lookup: most recent RI at or before column c ---
+    def get_w(wts, c):
+        candidates = [col for col in wts if col <= c]
+        if candidates:
+            return wts[max(candidates)]
+        return wts[min(wts)]  # fallback to earliest available (pre-2013 period)
+
+    # --- 6. composite index ---
+    composite = {}
+    for c in sorted(col_date):
+        i_s = idx_svc.get(c)
+        i_r = idx_rent.get(c)
+        i_o = idx_oer.get(c)
+        w_s = get_w(wts_svc,  c)
+        w_r = get_w(wts_rent, c)
+        w_o = get_w(wts_oer,  c)
+        if None in (i_s, i_r, i_o, w_s, w_r, w_o):
+            continue
+        w_net = w_s - w_r - w_o
+        if w_net <= 0:
+            continue
+        composite[c] = (i_s * w_s - i_r * w_r - i_o * w_o) / w_net
+
+    cols = sorted(composite)
+
+    # --- 7. variations ---
+    mom = {}
+    for i in range(1, len(cols)):
+        c, p = cols[i], cols[i - 1]
+        if composite[p]:
+            mom[c] = (composite[c] / composite[p] - 1) * 100
+
+    mom_ann = {c: ((1 + v / 100) ** 12 - 1) * 100 for c, v in mom.items()}
+
+    mc = sorted(mom)
+    mm3ma = {mc[i]: sum(mom[mc[i - j]] for j in range(3)) / 3
+             for i in range(2, len(mc))}
+    mm6ma = {mc[i]: sum(mom[mc[i - j]] for j in range(6)) / 6
+             for i in range(5, len(mc))}
+
+    yoy = {}
+    for c in cols:
+        p = c - 12
+        if p in composite and composite[p]:
+            yoy[c] = (composite[c] / composite[p] - 1) * 100
+
+    # --- 8. write rows 2320–2324 to FINAL (ws_write_raw) ---
+    for offset, (suffix, data) in enumerate([
+        ("MoM",   mom),
+        ("MoMA",  mom_ann),
+        ("MM3MA", mm3ma),
+        ("MM6MA", mm6ma),
+        ("YoY",   yoy),
+    ]):
+        row = CUSTOM_METRIC_START + offset
+        ws_write_raw.cell(row, 3).value = f"{CUSTOM_METRIC_LABEL} — {suffix}"
+        for c, v in data.items():
+            cell = ws_write_raw.cell(row, c)
+            cell.value         = round(v, 4)
+            cell.number_format = "0.00"
+
+    print(f"  Custom metric written rows {CUSTOM_METRIC_START}–{CUSTOM_METRIC_START + 4} "
+          f"({len(composite)} index pts, {len(mom)} MoM, {len(yoy)} YoY)")
+
+
+# ---------------------------------------------------------------------------
 # Step 7 – git commit + push
 # ---------------------------------------------------------------------------
 
@@ -686,6 +846,10 @@ def main():
     # 3. Fill Tabela data rows and colors
     fill_tabela(ws_tabela, ws_weights, variations, lc)
     apply_colors(ws_tabela, variations)
+
+    # 4. Custom metric (rows 2320–2324 in US_CPI)
+    print("--- Computing custom metric ---")
+    compute_and_write_custom_metric(ws_raw, ws_wts_src, ws_final_raw, lc)
 
     wb_final.save(str(FINAL_XLS))
     print(f"Saved: {FINAL_XLS}")
